@@ -81,6 +81,7 @@ canvas { max-width: 100%; }
 const DATA_DIR = './data/';
 let INDEX = null;
 const DAY_CACHE = {};
+const REC_CACHE = {};
 
 async function loadIndex() {
   if (INDEX) return INDEX;
@@ -89,10 +90,22 @@ async function loadIndex() {
   return INDEX;
 }
 async function loadDay(ds) {
-  if (DAY_CACHE[ds]) return DAY_CACHE[ds];
-  const res = await fetch(DATA_DIR + `day_${ds}.json?_=` + Date.now());
-  DAY_CACHE[ds] = await res.json();
+  if (DAY_CACHE[ds] !== undefined) return DAY_CACHE[ds];
+  try {
+    const res = await fetch(DATA_DIR + `day_${ds}.json?_=` + Date.now());
+    if (!res.ok) { DAY_CACHE[ds] = null; return null; }
+    DAY_CACHE[ds] = await res.json();
+  } catch (e) { DAY_CACHE[ds] = null; }
   return DAY_CACHE[ds];
+}
+async function loadRec(ds) {
+  if (REC_CACHE[ds] !== undefined) return REC_CACHE[ds];
+  try {
+    const res = await fetch(DATA_DIR + `rec_${ds}.json?_=` + Date.now());
+    if (!res.ok) { REC_CACHE[ds] = null; return null; }
+    REC_CACHE[ds] = await res.json();
+  } catch (e) { REC_CACHE[ds] = null; }
+  return REC_CACHE[ds];
 }
 function fmtYen(n) { return (n>=0?'+':'') + n.toLocaleString() + '円'; }
 function fmtRoi(roi) { return roi.toFixed(0) + '%'; }
@@ -126,19 +139,30 @@ function renderHome(idx) {
     const sp = d.strat_totals['三連複BOX5'] || {bet:0,pay:0};
     const sant = d.strat_totals['三連単Top1軸 1×2×4'] || {bet:0,pay:0};
     const umB = um.pay - um.bet, spB = sp.pay - sp.bet, santB = sant.pay - sant.bet;
+    let recCell;
+    if (d.has_rec) {
+      if (d.status === 'pending') {
+        recCell = `<td class="muted">📝 推奨記録 ${d.rec_n_races}R / 結果待ち</td>`;
+      } else {
+        recCell = `<td class="${clsBalance(d.rec_profit)}">${fmtYen(d.rec_profit)} (${d.rec_n_races}R)</td>`;
+      }
+    } else {
+      recCell = `<td class="muted">-</td>`;
+    }
     return `<tr>
       <td><a href="#day/${d.date_str}">${d.date}</a></td>
-      <td>${d.race_count}R</td>
+      <td>${d.race_count || d.rec_n_races || 0}R</td>
       <td class="${clsBalance(umB)}">${fmtYen(umB)}</td>
       <td class="${clsBalance(spB)}">${fmtYen(spB)}</td>
       <td class="${clsBalance(santB)}">${fmtYen(santB)}</td>
+      ${recCell}
     </tr>`;
   }).join('');
   return `
     <h1>📊 ダッシュボード</h1>
     <p class="muted">生成: ${idx.generated_at} / 対象 ${days.length}日 / 全${days.reduce((s,d)=>s+d.race_count,0)}R</p>
     <h2>累積収支グラフ</h2>
-    <div class="card"><canvas id="balChart" height="220"></canvas></div>
+    <div class="card"><div style="position:relative;height:240px;"><canvas id="balChart"></canvas></div></div>
     <h2>戦略別 全期間サマリ</h2>
     <div class="card"><table>
       <tr><th>戦略</th><th>R</th><th>HIT</th><th>HIT率</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
@@ -146,9 +170,10 @@ function renderHome(idx) {
     </table></div>
     <h2>日別 主要戦略 収支</h2>
     <div class="card"><table>
-      <tr><th>日付</th><th>R</th><th>馬連BOX5</th><th>三連複BOX5</th><th>三連単フォメ</th></tr>
+      <tr><th>日付</th><th>R</th><th>馬連BOX5 (機械)</th><th>三連複BOX5 (機械)</th><th>三連単フォメ (機械)</th><th>🎯 実推奨収支</th></tr>
       ${dayRows}
     </table></div>
+    <p class="muted">※ 機械列 = 「もし機械的にBOX買い/フォメ買いしてたら」のシミュレーション。実推奨列 = 私が実際に出した買い目の結果。</p>
   `;
 }
 
@@ -210,7 +235,7 @@ function renderStrategy(idx) {
   setTimeout(() => drawChart('stratChart', labels, datasets), 10);
   return `
     <h1>⚔️ 戦略パフォーマンス</h1>
-    <div class="card"><canvas id="stratChart" height="260"></canvas></div>
+    <div class="card"><div style="position:relative;height:280px;"><canvas id="stratChart"></canvas></div></div>
     <h2>戦略別 累積</h2>
     <div class="card"><table>
       <tr><th>戦略</th><th>R</th><th>HIT</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
@@ -225,42 +250,109 @@ function renderDayList(idx) {
   return `<h1>📅 日別ページ</h1><div class="card day-list">${links}</div>`;
 }
 
+function renderRecRace(key, race) {
+  const bets = race.recommended_bets.map(b => {
+    let cls = 'muted';
+    if (race.outcome) {
+      const matched = race.outcome.bets.find(ob => ob.type === b.type && ob.details === b.details);
+      if (matched && matched.pay > 0) cls = 'hit';
+      else if (matched) cls = 'miss';
+    }
+    let payCell = '';
+    if (race.outcome) {
+      const matched = race.outcome.bets.find(ob => ob.type === b.type && ob.details === b.details);
+      if (matched && matched.pay > 0) payCell = ` <b class="pos">→ +${matched.pay.toLocaleString()}円</b>`;
+      else if (matched) payCell = ` <span class="muted">→ 外</span>`;
+    }
+    return `<li class="${cls === 'hit' ? 'hit' : ''}" style="padding:2px 4px;">
+      ${b.type} <code>${b.details}</code> (${b.points}点×${b.per_pt}円=${b.amount}円)${payCell}
+    </li>`;
+  }).join('');
+  const reason = race.reasoning.map(t => `<li>${t}</li>`).join('');
+  const filters = race.filters_applied.map(t => `<li>${t}</li>`).join('');
+  const actual = race.outcome ? `<b>着順 ${race.outcome.actual.join('-')}</b>` : '<span class="muted">結果待ち</span>';
+  const profit = race.outcome ?
+    `<b class="${race.outcome.profit >= 0 ? 'pos' : 'neg'}">収支 ${fmtYen(race.outcome.profit)}</b>` :
+    '<span class="muted">-</span>';
+  return `
+    <details ${race.outcome && race.outcome.profit > 0 ? 'open' : ''} class="card" style="margin:6px 0;padding:8px;">
+      <summary><b>${key}</b> ${race.info} / ${actual} / ${profit}</summary>
+      <h3>適用フィルタ</h3><ul>${filters}</ul>
+      <h3>推奨買い目</h3><ul>${bets}</ul>
+      <h3>理由</h3><ul>${reason}</ul>
+    </details>
+  `;
+}
+
 async function renderDay(ds) {
   const day = await loadDay(ds);
-  const stratNames = Object.keys(day.races[0]?.strategies || {});
-  const stratHdrs = stratNames.map(sn => `<th>${sn}</th>`).join('');
-  const rows = day.races.map(r => {
-    const cells = stratNames.map(sn => {
-      const st = r.strategies[sn] || {bet:0,pay:0};
-      if (st.pay > 0) return `<td class="hit">${st.pay.toLocaleString()}</td>`;
-      return `<td class="miss">-</td>`;
+  const rec = await loadRec(ds);
+
+  let recSection = '';
+  if (rec) {
+    const t = rec.day_totals || {};
+    const statusBadge = rec.status === 'pending' ?
+      '<span class="muted">⏳ 結果待ち</span>' :
+      rec.status === 'partial' ? '<span class="muted">📝 主要Rのみ記録</span>' : '';
+    const totalLine = rec.day_totals ?
+      `投資 ${(t.investment||0).toLocaleString()}円 → 配当 ${(t.payout||0).toLocaleString()}円 → <b class="${t.profit>=0?'pos':'neg'}">${fmtYen(t.profit||0)}</b>` :
+      '<span class="muted">集計待ち</span>';
+    const filtersHtml = (rec.global_filters || []).map(f => `<li>${f}</li>`).join('');
+    const racesHtml = Object.entries(rec.races).map(([k, r]) => renderRecRace(k, r)).join('');
+    recSection = `
+      <h2>🎯 実推奨 ${statusBadge}</h2>
+      <div class="card"><p>${totalLine}</p>
+        ${rec.note ? `<p class="muted">${rec.note}</p>` : ''}
+        ${filtersHtml ? `<h3>全レース共通フィルタ</h3><ul>${filtersHtml}</ul>` : ''}
+      </div>
+      <h3>R毎 推奨と理由</h3>
+      ${racesHtml}
+    `;
+  }
+
+  let simSection = '';
+  if (day) {
+    const stratNames = Object.keys(day.races[0]?.strategies || {});
+    const stratHdrs = stratNames.map(sn => `<th>${sn}</th>`).join('');
+    const rows = day.races.map(r => {
+      const cells = stratNames.map(sn => {
+        const st = r.strategies[sn] || {bet:0,pay:0};
+        if (st.pay > 0) return `<td class="hit">${st.pay.toLocaleString()}</td>`;
+        return `<td class="miss">-</td>`;
+      }).join('');
+      const top5 = r.top5.slice(0,5).map(h => `${h.num}.${h.name}`).join(' / ');
+      return `<tr>
+        <td>${r.key}</td>
+        <td>${r.info}<br><small class="muted">${top5}</small></td>
+        <td><code>${r.box.join(',')}</code></td>
+        <td><b>${r.actual.join('-')}</b></td>
+        ${cells}
+      </tr>`;
     }).join('');
-    const top5 = r.top5.slice(0,5).map(h => `${h.num}.${h.name}`).join(' / ');
-    return `<tr>
-      <td>${r.key}</td>
-      <td>${r.info}<br><small class="muted">${top5}</small></td>
-      <td><code>${r.box.join(',')}</code></td>
-      <td><b>${r.actual.join('-')}</b></td>
-      ${cells}
-    </tr>`;
-  }).join('');
-  const sumRows = Object.entries(day.strat_totals).map(([sn, t]) => {
-    const roi = t.bet ? t.pay/t.bet*100 : 0;
-    return `<tr><td>${sn}</td><td>${t.cnt}R</td><td>${t.hit}HIT</td><td>${t.bet.toLocaleString()}</td><td>${t.pay.toLocaleString()}</td><td class="${(t.pay-t.bet>=0)?'pos':'neg'}">${fmtYen(t.pay-t.bet)}</td><td class="${roi>=100?'pos':'neg'}">${fmtRoi(roi)}</td></tr>`;
-  }).join('');
+    const sumRows = Object.entries(day.strat_totals).map(([sn, t]) => {
+      const roi = t.bet ? t.pay/t.bet*100 : 0;
+      return `<tr><td>${sn}</td><td>${t.cnt}R</td><td>${t.hit}HIT</td><td>${t.bet.toLocaleString()}</td><td>${t.pay.toLocaleString()}</td><td class="${(t.pay-t.bet>=0)?'pos':'neg'}">${fmtYen(t.pay-t.bet)}</td><td class="${roi>=100?'pos':'neg'}">${fmtRoi(roi)}</td></tr>`;
+    }).join('');
+    simSection = `
+      <h2>⚙️ 機械シミュレーション</h2>
+      <div class="card"><table>
+        <tr><th>戦略</th><th>R</th><th>HIT</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
+        ${sumRows}
+      </table></div>
+      <details><summary>R毎 機械配当 (タップで展開)</summary>
+      <div class="card"><table>
+        <tr><th>R</th><th>レース / Top5</th><th>BOX5</th><th>着順</th>${stratHdrs}</tr>
+        ${rows}
+      </table></div></details>
+    `;
+  }
+
+  const dateDisp = day?.date || rec?.date || ds;
   return `
-    <h1>📅 ${day.date} 詳細</h1>
+    <h1>📅 ${dateDisp} 詳細</h1>
     <nav><a href="#">← ダッシュボード</a></nav>
-    <h2>当日 戦略別サマリ</h2>
-    <div class="card"><table>
-      <tr><th>戦略</th><th>R</th><th>HIT</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
-      ${sumRows}
-    </table></div>
-    <h2>R毎 配当 (色付き=HIT)</h2>
-    <div class="card"><table>
-      <tr><th>R</th><th>レース / Top5</th><th>BOX5</th><th>着順</th>${stratHdrs}</tr>
-      ${rows}
-    </table></div>
+    ${recSection}
+    ${simSection}
   `;
 }
 
@@ -281,7 +373,7 @@ async function route() {
     document.getElementById('navDays').classList.add('active');
   } else {
     app.innerHTML = renderHome(idx);
-    renderChart(idx.dates);
+    setTimeout(() => renderChart(idx.dates), 10);
     document.getElementById('navHome').classList.add('active');
   }
   window.scrollTo(0, 0);

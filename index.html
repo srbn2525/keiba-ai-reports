@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>競馬AI 振り返り</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root {
+  --bg: #fafafa; --fg: #222; --card: #fff; --border: #ddd;
+  --pos: #28a745; --neg: #dc3545; --hit-bg: #d4edda; --hit-fg: #155724;
+  --muted: #999; --accent: #3498db;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#181818; --fg:#eee; --card:#222; --border:#444;
+    --hit-bg:#1e3a25; --hit-fg:#9be0a3; --muted:#888;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: 'Yu Gothic', 'Meiryo', -apple-system, BlinkMacSystemFont, sans-serif;
+  margin: 0; padding: 12px; background: var(--bg); color: var(--fg);
+  -webkit-text-size-adjust: 100%;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+h1, h2, h3 { margin: 16px 0 8px; }
+h1 { font-size: 1.4em; border-bottom: 2px solid var(--accent); padding-bottom: 4px; }
+h2 { font-size: 1.15em; }
+h3 { font-size: 1em; color: var(--muted); }
+nav { padding: 8px 0; display: flex; gap: 12px; flex-wrap: wrap; }
+nav a, nav button {
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 12px; color: var(--fg); text-decoration: none; cursor: pointer;
+  font-size: 14px;
+}
+nav a.active, nav button.active { background: var(--accent); color: #fff; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px; margin: 10px 0; overflow-x: auto;
+}
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; white-space: nowrap; }
+th { background: rgba(0,0,0,0.04); font-weight: 600; }
+@media (prefers-color-scheme: dark) { th { background: rgba(255,255,255,0.05); } }
+.hit { background: var(--hit-bg); color: var(--hit-fg); font-weight: bold; }
+.miss { color: var(--muted); }
+.pos { color: var(--pos); font-weight: bold; }
+.neg { color: var(--neg); }
+code {
+  font-family: 'Menlo', 'Consolas', monospace; font-size: 12px;
+  background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px;
+}
+@media (prefers-color-scheme: dark) { code { background: rgba(255,255,255,0.1); } }
+a { color: var(--accent); }
+.muted { color: var(--muted); font-size: 12px; }
+canvas { max-width: 100%; }
+.day-list a { display: inline-block; margin: 3px 8px 3px 0; padding: 4px 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 4px;
+  text-decoration: none; font-size: 13px; }
+.day-list a:hover { background: var(--accent); color: #fff; }
+@media (max-width: 600px) {
+  body { padding: 8px; }
+  h1 { font-size: 1.2em; }
+  th, td { padding: 4px 5px; font-size: 12px; }
+  table { font-size: 12px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <nav>
+    <a href="#" id="navHome">📊 ダッシュボード</a>
+    <a href="#strategy" id="navStrategy">⚔️ 戦略</a>
+    <a href="#days" id="navDays">📅 日別</a>
+  </nav>
+  <main id="app">読み込み中...</main>
+</div>
+
+<script>
+const DATA_DIR = './data/';
+let INDEX = null;
+const DAY_CACHE = {};
+
+async function loadIndex() {
+  if (INDEX) return INDEX;
+  const res = await fetch(DATA_DIR + 'dates.json?_=' + Date.now());
+  INDEX = await res.json();
+  return INDEX;
+}
+async function loadDay(ds) {
+  if (DAY_CACHE[ds]) return DAY_CACHE[ds];
+  const res = await fetch(DATA_DIR + `day_${ds}.json?_=` + Date.now());
+  DAY_CACHE[ds] = await res.json();
+  return DAY_CACHE[ds];
+}
+function fmtYen(n) { return (n>=0?'+':'') + n.toLocaleString() + '円'; }
+function fmtRoi(roi) { return roi.toFixed(0) + '%'; }
+function clsBalance(b) { return b >= 0 ? 'pos' : 'neg'; }
+
+function renderHome(idx) {
+  const days = idx.dates;
+  const totals = {};
+  days.forEach(d => {
+    Object.entries(d.strat_totals).forEach(([sn, st]) => {
+      if (!totals[sn]) totals[sn] = {bet:0, pay:0, hit:0, cnt:0};
+      totals[sn].bet += st.bet; totals[sn].pay += st.pay;
+      totals[sn].hit += st.hit; totals[sn].cnt += st.cnt;
+    });
+  });
+  const stratList = Object.entries(totals).sort((a,b) => b[1].pay - a[1].pay);
+  const stratRows = stratList.map(([sn, t]) => {
+    const roi = t.bet ? t.pay/t.bet*100 : 0;
+    const bal = t.pay - t.bet;
+    return `<tr>
+      <td>${sn}</td><td>${t.cnt}R</td><td>${t.hit}</td>
+      <td>${(t.hit/t.cnt*100).toFixed(0)}%</td>
+      <td>${t.bet.toLocaleString()}円</td>
+      <td>${t.pay.toLocaleString()}円</td>
+      <td class="${clsBalance(bal)}">${fmtYen(bal)}</td>
+      <td class="${roi>=100?'pos':'neg'}">${fmtRoi(roi)}</td>
+    </tr>`;
+  }).join('');
+  const dayRows = days.map(d => {
+    const um = d.strat_totals['馬連BOX5'] || {bet:0,pay:0};
+    const sp = d.strat_totals['三連複BOX5'] || {bet:0,pay:0};
+    const sant = d.strat_totals['三連単Top1軸 1×2×4'] || {bet:0,pay:0};
+    const umB = um.pay - um.bet, spB = sp.pay - sp.bet, santB = sant.pay - sant.bet;
+    return `<tr>
+      <td><a href="#day/${d.date_str}">${d.date}</a></td>
+      <td>${d.race_count}R</td>
+      <td class="${clsBalance(umB)}">${fmtYen(umB)}</td>
+      <td class="${clsBalance(spB)}">${fmtYen(spB)}</td>
+      <td class="${clsBalance(santB)}">${fmtYen(santB)}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <h1>📊 ダッシュボード</h1>
+    <p class="muted">生成: ${idx.generated_at} / 対象 ${days.length}日 / 全${days.reduce((s,d)=>s+d.race_count,0)}R</p>
+    <h2>累積収支グラフ</h2>
+    <div class="card"><canvas id="balChart" height="220"></canvas></div>
+    <h2>戦略別 全期間サマリ</h2>
+    <div class="card"><table>
+      <tr><th>戦略</th><th>R</th><th>HIT</th><th>HIT率</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
+      ${stratRows}
+    </table></div>
+    <h2>日別 主要戦略 収支</h2>
+    <div class="card"><table>
+      <tr><th>日付</th><th>R</th><th>馬連BOX5</th><th>三連複BOX5</th><th>三連単フォメ</th></tr>
+      ${dayRows}
+    </table></div>
+  `;
+}
+
+function drawChart(canvasId, labels, datasets) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      scales: { y: { ticks: { callback: v => (v>=0?'+':'')+v.toLocaleString() } } },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } },
+    }
+  });
+}
+
+function renderChart(days) {
+  const labels = days.map(d => d.date.slice(5));
+  let umCum = 0, spCum = 0, santCum = 0;
+  const um = [], sp = [], sant = [];
+  days.forEach(d => {
+    const u = d.strat_totals['馬連BOX5'] || {bet:0,pay:0};
+    const s = d.strat_totals['三連複BOX5'] || {bet:0,pay:0};
+    const t = d.strat_totals['三連単Top1軸 1×2×4'] || {bet:0,pay:0};
+    umCum += u.pay - u.bet; spCum += s.pay - s.bet; santCum += t.pay - t.bet;
+    um.push(umCum); sp.push(spCum); sant.push(santCum);
+  });
+  drawChart('balChart', labels, [
+    { label: '馬連BOX5', data: um, borderColor:'#3498db', backgroundColor:'#3498db20', tension:0.2 },
+    { label: '三連複BOX5', data: sp, borderColor:'#e74c3c', backgroundColor:'#e74c3c20', tension:0.2 },
+    { label: '三連単フォメ', data: sant, borderColor:'#2ecc71', backgroundColor:'#2ecc7120', tension:0.2 },
+  ]);
+}
+
+function renderStrategy(idx) {
+  const days = idx.dates;
+  const stratNames = Object.keys(days[0].strat_totals);
+  const colors = ['#3498db','#e74c3c','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22'];
+  const labels = days.map(d => d.date.slice(5));
+  const datasets = stratNames.map((sn, i) => {
+    let cum = 0;
+    const data = days.map(d => {
+      const t = d.strat_totals[sn] || {bet:0,pay:0};
+      cum += t.pay - t.bet;
+      return cum;
+    });
+    return { label: sn, data, borderColor: colors[i%colors.length], tension: 0.2, fill: false };
+  });
+  const stratRoiRows = stratNames.map(sn => {
+    const tot = days.reduce((acc, d) => {
+      const t = d.strat_totals[sn] || {bet:0,pay:0,hit:0,cnt:0};
+      acc.bet += t.bet; acc.pay += t.pay; acc.hit += t.hit; acc.cnt += t.cnt;
+      return acc;
+    }, {bet:0,pay:0,hit:0,cnt:0});
+    const roi = tot.bet ? tot.pay/tot.bet*100 : 0;
+    return `<tr><td>${sn}</td><td>${tot.cnt}R</td><td>${tot.hit}HIT (${(tot.hit/tot.cnt*100).toFixed(0)}%)</td><td>${tot.bet.toLocaleString()}</td><td>${tot.pay.toLocaleString()}</td><td class="${(tot.pay-tot.bet>=0)?'pos':'neg'}">${fmtYen(tot.pay-tot.bet)}</td><td class="${roi>=100?'pos':'neg'}">${fmtRoi(roi)}</td></tr>`;
+  }).join('');
+  setTimeout(() => drawChart('stratChart', labels, datasets), 10);
+  return `
+    <h1>⚔️ 戦略パフォーマンス</h1>
+    <div class="card"><canvas id="stratChart" height="260"></canvas></div>
+    <h2>戦略別 累積</h2>
+    <div class="card"><table>
+      <tr><th>戦略</th><th>R</th><th>HIT</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
+      ${stratRoiRows}
+    </table></div>
+    <p class="muted">※ 全戦略の機械シミュレーション。実推奨買い目とは別。</p>
+  `;
+}
+
+function renderDayList(idx) {
+  const links = idx.dates.map(d => `<a href="#day/${d.date_str}">${d.date} (${d.race_count}R)</a>`).join('');
+  return `<h1>📅 日別ページ</h1><div class="card day-list">${links}</div>`;
+}
+
+async function renderDay(ds) {
+  const day = await loadDay(ds);
+  const stratNames = Object.keys(day.races[0]?.strategies || {});
+  const stratHdrs = stratNames.map(sn => `<th>${sn}</th>`).join('');
+  const rows = day.races.map(r => {
+    const cells = stratNames.map(sn => {
+      const st = r.strategies[sn] || {bet:0,pay:0};
+      if (st.pay > 0) return `<td class="hit">${st.pay.toLocaleString()}</td>`;
+      return `<td class="miss">-</td>`;
+    }).join('');
+    const top5 = r.top5.slice(0,5).map(h => `${h.num}.${h.name}`).join(' / ');
+    return `<tr>
+      <td>${r.key}</td>
+      <td>${r.info}<br><small class="muted">${top5}</small></td>
+      <td><code>${r.box.join(',')}</code></td>
+      <td><b>${r.actual.join('-')}</b></td>
+      ${cells}
+    </tr>`;
+  }).join('');
+  const sumRows = Object.entries(day.strat_totals).map(([sn, t]) => {
+    const roi = t.bet ? t.pay/t.bet*100 : 0;
+    return `<tr><td>${sn}</td><td>${t.cnt}R</td><td>${t.hit}HIT</td><td>${t.bet.toLocaleString()}</td><td>${t.pay.toLocaleString()}</td><td class="${(t.pay-t.bet>=0)?'pos':'neg'}">${fmtYen(t.pay-t.bet)}</td><td class="${roi>=100?'pos':'neg'}">${fmtRoi(roi)}</td></tr>`;
+  }).join('');
+  return `
+    <h1>📅 ${day.date} 詳細</h1>
+    <nav><a href="#">← ダッシュボード</a></nav>
+    <h2>当日 戦略別サマリ</h2>
+    <div class="card"><table>
+      <tr><th>戦略</th><th>R</th><th>HIT</th><th>投資</th><th>配当</th><th>収支</th><th>ROI</th></tr>
+      ${sumRows}
+    </table></div>
+    <h2>R毎 配当 (色付き=HIT)</h2>
+    <div class="card"><table>
+      <tr><th>R</th><th>レース / Top5</th><th>BOX5</th><th>着順</th>${stratHdrs}</tr>
+      ${rows}
+    </table></div>
+  `;
+}
+
+async function route() {
+  const idx = await loadIndex();
+  const app = document.getElementById('app');
+  const h = location.hash.slice(1);
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  if (h.startsWith('day/')) {
+    const ds = h.slice(4);
+    app.innerHTML = '読み込み中...';
+    app.innerHTML = await renderDay(ds);
+  } else if (h === 'strategy') {
+    app.innerHTML = renderStrategy(idx);
+    document.getElementById('navStrategy').classList.add('active');
+  } else if (h === 'days') {
+    app.innerHTML = renderDayList(idx);
+    document.getElementById('navDays').classList.add('active');
+  } else {
+    app.innerHTML = renderHome(idx);
+    renderChart(idx.dates);
+    document.getElementById('navHome').classList.add('active');
+  }
+  window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>
